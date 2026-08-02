@@ -1,7 +1,7 @@
 """
-Tether (USDT/IRT) Price Tracker
---------------------------------
-Fetches the current USDT price in Toman from Nobitex's public API,
+Ethereum (ETH/USD) Price Tracker
+----------------------------------
+Fetches the current ETH price in USD from CoinGecko's public API,
 compares it to the last known price, and sends a Telegram alert
 if the price moved more than PRICE_CHANGE_THRESHOLD percent.
 
@@ -17,7 +17,7 @@ import requests
 # CONFIG
 # ==============================
 
-NOBITEX_URL = "https://api.nobitex.ir/market/stats"
+COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
 PRICE_FILE = "last_price.json"
 
 # Alert if price changes by more than this percentage since last check
@@ -32,22 +32,19 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # ==============================
 
 def get_current_price():
-    """Fetch the current USDT/IRT price from Nobitex."""
+    """Fetch the current ETH/USD price from CoinGecko."""
 
-    response = requests.post(
-        NOBITEX_URL,
-        data={"srcCurrency": "usdt", "dstCurrency": "rls"},
+    response = requests.get(
+        COINGECKO_URL,
+        params={"ids": "ethereum", "vs_currencies": "usd"},
         timeout=10,
     )
     response.raise_for_status()
 
     data = response.json()
-    stats = data["stats"]["usdt-rls"]
+    price_usd = float(data["ethereum"]["usd"])
 
-    # Nobitex returns Rial, convert to Toman (divide by 10)
-    price_toman = float(stats["latest"]) / 10
-
-    return round(price_toman)
+    return round(price_usd, 2)
 
 
 def load_last_price():
@@ -106,7 +103,7 @@ def main():
         print(f"Failed to fetch price: {e}")
         sys.exit(1)
 
-    print(f"Current USDT price: {current_price:,} Toman")
+    print(f"Current ETH price: ${current_price:,}")
 
     last_price = load_last_price()
 
@@ -117,16 +114,16 @@ def main():
 
     change = percent_change(last_price, current_price)
 
-    print(f"Last price: {last_price:,} Toman | Change: {change:.2f}%")
+    print(f"Last price: ${last_price:,} | Change: {change:.2f}%")
 
     if abs(change) >= PRICE_CHANGE_THRESHOLD:
 
         direction = "📈 افزایش" if change > 0 else "📉 کاهش"
 
         message = (
-            f"{direction} قیمت تتر\n\n"
-            f"قیمت قبلی: {last_price:,} تومان\n"
-            f"قیمت فعلی: {current_price:,} تومان\n"
+            f"{direction} قیمت اتریوم\n\n"
+            f"قیمت قبلی: ${last_price:,}\n"
+            f"قیمت فعلی: ${current_price:,}\n"
             f"تغییر: {change:.2f}%"
         )
 
