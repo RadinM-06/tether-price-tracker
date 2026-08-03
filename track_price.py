@@ -1,13 +1,14 @@
-
 """
 Ethereum (ETH/USD) Price Tracker
 ----------------------------------
 Fetches the current ETH price in USD from CoinGecko's public API,
 compares it to the last known price, and sends a Telegram alert
-if the price moved more than PRICE_CHANGE_THRESHOLD percent.
+if the price moved more than PRICE_CHANGE_THRESHOLD percent since
+the last check, OR more than DAILY_CHANGE_THRESHOLD since the start
+of the day (Tehran time).
 
 Also sends a daily summary message once a day at DAILY_SUMMARY_HOUR
-(Tehran time), regardless of whether the price crossed the threshold,
+(Tehran time), regardless of whether the price crossed any threshold,
 so you know the bot is alive even on quiet days.
 
 Runs on a schedule via GitHub Actions (see .github/workflows/check_price.yml).
@@ -28,8 +29,11 @@ import requests
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
 PRICE_FILE = "last_price.json"
 
-# Alert if price changes by more than this percentage since last check
+# Alert if price changes by more than this percentage since the last check
 PRICE_CHANGE_THRESHOLD = 1.0  # percent
+
+# Alert if price changes by more than this percentage since today's reference price
+DAILY_CHANGE_THRESHOLD = 1.0  # percent
 
 # Hour (24h, Tehran time) at which a daily summary is always sent
 DAILY_SUMMARY_HOUR = 22
@@ -58,49 +62,78 @@ def get_current_price():
     return round(price_usd, 2)
 
 
-def load_last_price():
-    """Read the previously saved price, if any."""
+def get_tehran_now():
+    """
+    Return the current time in Tehran, falling back to naive UTC
+    if the timezone database isn't available for any reason.
+    This must never crash the script.
+    """
+
+    try:
+        return datetime.now(ZoneInfo("Asia/Tehran"))
+    except Exception as e:
+        print(f"Warning: could not load Asia/Tehran timezone ({e}). Falling back to UTC.")
+        return datetime.utcnow()
+
+
+def load_state():
+    """
+    Read the previously saved state:
+    {
+      "price": <last checked price>,
+      "day_reference_price": <price at the start of today>,
+      "day_reference_date": "YYYY-MM-DD" (Tehran date)
+    }
+    Returns a dict with defaults if the file doesn't exist yet.
+    """
 
     if not os.path.exists(PRICE_FILE):
-        return None
+        return {"price": None, "day_reference_price": None, "day_reference_date": None}
 
     with open(PRICE_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
-        return data.get("price")
+        return {
+            "price": data.get("price"),
+            "day_reference_price": data.get("day_reference_price"),
+            "day_reference_date": data.get("day_reference_date"),
+        }
 
 
-def save_price(price):
-    """Save the current price for the next run."""
+def save_state(state):
+    """Save the current state for the next run. Always called, no matter what else happens."""
 
     with open(PRICE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"price": price}, f, ensure_ascii=False, indent=2)
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def send_telegram_message(text):
-    """Send a Markdown-formatted message via the Telegram bot."""
+    """Send a Markdown-formatted message via the Telegram bot. Never raises on failure."""
 
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram credentials are missing. Skipping notification.")
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    response = requests.post(
-        url,
-        data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "parse_mode": "Markdown",
-        },
-        timeout=10,
-    )
-    response.raise_for_status()
+        response = requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "Markdown",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+    except Exception as e:
+        print(f"Warning: failed to send Telegram message: {e}")
 
 
 def percent_change(old_price, new_price):
     """Calculate percentage change between two prices."""
 
-    if old_price == 0:
+    if not old_price:
         return 0
 
     return ((new_price - old_price) / old_price) * 100
@@ -113,18 +146,14 @@ def format_change(change):
     return f"{sign}{change:.2f}%"
 
 
-def is_daily_summary_time():
-    """Check whether it's currently the configured daily summary hour (Tehran time)."""
-
-    tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
-    return tehran_now.hour == DAILY_SUMMARY_HOUR
-
-
 # ==============================
 # MAIN
 # ==============================
 
 def main():
+
+    state = load_state()
+    today_str = get_tehran_now().strftime("%Y-%m-%d")
 
     try:
         current_price = get_current_price()
@@ -134,57 +163,76 @@ def main():
 
     print(f"Current ETH price: ${current_price:,}")
 
-    last_price = load_last_price()
+    last_price = state["price"]
 
-    if last_price is None:
-        print("No previous price found. Saving current price as baseline.")
-        save_price(current_price)
-        return
+    # Reset the daily reference price if it's a new day (Tehran time)
+    if state["day_reference_date"] != today_str:
+        print("New day detected. Resetting daily reference price.")
+        state["day_reference_price"] = current_price
+        state["day_reference_date"] = today_str
 
-    change = percent_change(last_price, current_price)
-
-    print(f"Last price: ${last_price:,} | Change: {change:.2f}%")
+    day_reference_price = state["day_reference_price"]
 
     alert_sent = False
 
-    if abs(change) >= PRICE_CHANGE_THRESHOLD:
+    if last_price is not None:
 
-        if change > 0:
-            header = "📈 *افزایش قیمت اتریوم*"
-        else:
-            header = "📉 *کاهش قیمت اتریوم*"
+        hourly_change = percent_change(last_price, current_price)
+        daily_change = percent_change(day_reference_price, current_price)
 
-        message = (
-            f"{header}\n\n"
-            f"💰 قیمت قبلی: `${last_price:,}`\n"
-            f"🔔 قیمت فعلی: *${current_price:,}*\n"
-            f"📊 تغییر: *{format_change(change)}*"
-        )
+        print(f"Last price: ${last_price:,} | Hourly change: {hourly_change:.2f}%")
+        print(f"Today's reference: ${day_reference_price:,} | Daily change: {daily_change:.2f}%")
 
-        send_telegram_message(message)
-        alert_sent = True
-        print("Threshold alert sent.")
+        triggered_change = None
+        change_label = None
 
-    # Daily summary: sent once a day regardless of the threshold,
-    # so you know the bot is alive even without a big price move.
-    if not alert_sent and is_daily_summary_time():
+        if abs(hourly_change) >= PRICE_CHANGE_THRESHOLD:
+            triggered_change = hourly_change
+            change_label = "نسبت به چک قبلی"
+        elif abs(daily_change) >= DAILY_CHANGE_THRESHOLD:
+            triggered_change = daily_change
+            change_label = "نسبت به ابتدای امروز"
 
-        trend_emoji = "📈" if change > 0 else "📉" if change < 0 else "➖"
+        if triggered_change is not None:
 
-        message = (
-            f"📋 *خلاصه‌ی روزانه*\n\n"
-            f"💎 قیمت فعلی اتریوم: *${current_price:,}*\n"
-            f"{trend_emoji} تغییر نسبت به چک قبلی: *{format_change(change)}*\n\n"
-            f"✅ ربات فعاله و در حال رصده"
-        )
+            header = "📈 *افزایش قیمت اتریوم*" if triggered_change > 0 else "📉 *کاهش قیمت اتریوم*"
 
-        send_telegram_message(message)
-        print("Daily summary sent.")
+            message = (
+                f"{header}\n\n"
+                f"💰 قیمت قبلی: `${last_price:,}`\n"
+                f"🔔 قیمت فعلی: *${current_price:,}*\n"
+                f"📊 تغییر ({change_label}): *{format_change(triggered_change)}*"
+            )
 
-    if not alert_sent and not is_daily_summary_time():
-        print("Change below threshold. No alert sent.")
+            send_telegram_message(message)
+            alert_sent = True
+            print("Threshold alert sent.")
 
-    save_price(current_price)
+        # Daily summary: sent once a day regardless of the threshold,
+        # so you know the bot is alive even without a big price move.
+        if not alert_sent and get_tehran_now().hour == DAILY_SUMMARY_HOUR:
+
+            trend_emoji = "📈" if daily_change > 0 else "📉" if daily_change < 0 else "➖"
+
+            message = (
+                f"📋 *خلاصه‌ی روزانه*\n\n"
+                f"💎 قیمت فعلی اتریوم: *${current_price:,}*\n"
+                f"{trend_emoji} تغییر نسبت به ابتدای امروز: *{format_change(daily_change)}*\n\n"
+                f"✅ ربات فعاله و در حال رصده"
+            )
+
+            send_telegram_message(message)
+            print("Daily summary sent.")
+
+        if not alert_sent:
+            print("No threshold crossed and not summary time. No alert sent.")
+
+    else:
+        print("No previous price found. Saving current price as baseline.")
+
+    # Always save the latest state, no matter what happened above.
+    state["price"] = current_price
+    save_state(state)
 
 
 if __name__ == "__main__":
