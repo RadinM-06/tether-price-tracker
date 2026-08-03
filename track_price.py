@@ -7,9 +7,12 @@ if the price moved more than PRICE_CHANGE_THRESHOLD percent since
 the last check, OR more than DAILY_CHANGE_THRESHOLD since the start
 of the day (Tehran time).
 
-Also sends a daily summary message once a day at DAILY_SUMMARY_HOUR
-(Tehran time), regardless of whether the price crossed any threshold,
-so you know the bot is alive even on quiet days.
+Also sends one daily summary message per day, any time at or after
+DAILY_SUMMARY_HOUR (Tehran time) -- whichever run happens to be the
+first one that day at or past that hour. This way, if GitHub Actions
+skips the exact scheduled run at that hour (which it sometimes does),
+the next run later that day still catches it, instead of losing the
+whole day's summary.
 
 Runs on a schedule via GitHub Actions (see .github/workflows/check_price.yml).
 """
@@ -35,7 +38,7 @@ PRICE_CHANGE_THRESHOLD = 1.0  # percent
 # Alert if price changes by more than this percentage since today's reference price
 DAILY_CHANGE_THRESHOLD = 1.0  # percent
 
-# Hour (24h, Tehran time) at which a daily summary is always sent
+# Hour (24h, Tehran time) at or after which a daily summary is sent (once per day)
 DAILY_SUMMARY_HOUR = 22
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -82,13 +85,19 @@ def load_state():
     {
       "price": <last checked price>,
       "day_reference_price": <price at the start of today>,
-      "day_reference_date": "YYYY-MM-DD" (Tehran date)
+      "day_reference_date": "YYYY-MM-DD" (Tehran date),
+      "last_summary_date": "YYYY-MM-DD" (last date a daily summary was sent)
     }
     Returns a dict with defaults if the file doesn't exist yet.
     """
 
     if not os.path.exists(PRICE_FILE):
-        return {"price": None, "day_reference_price": None, "day_reference_date": None}
+        return {
+            "price": None,
+            "day_reference_price": None,
+            "day_reference_date": None,
+            "last_summary_date": None,
+        }
 
     with open(PRICE_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -96,6 +105,7 @@ def load_state():
             "price": data.get("price"),
             "day_reference_price": data.get("day_reference_price"),
             "day_reference_date": data.get("day_reference_date"),
+            "last_summary_date": data.get("last_summary_date"),
         }
 
 
@@ -153,7 +163,8 @@ def format_change(change):
 def main():
 
     state = load_state()
-    today_str = get_tehran_now().strftime("%Y-%m-%d")
+    tehran_now = get_tehran_now()
+    today_str = tehran_now.strftime("%Y-%m-%d")
 
     try:
         current_price = get_current_price()
@@ -208,9 +219,14 @@ def main():
             alert_sent = True
             print("Threshold alert sent.")
 
-        # Daily summary: sent once a day regardless of the threshold,
-        # so you know the bot is alive even without a big price move.
-        if not alert_sent and get_tehran_now().hour == DAILY_SUMMARY_HOUR:
+        # Daily summary: sent once per day, any run at or after DAILY_SUMMARY_HOUR.
+        # Using "last_summary_date" (not an exact hour match) means a skipped
+        # scheduled run doesn't cost you the whole day's summary -- the next
+        # run that day, whenever it happens, will still catch it.
+        already_sent_today = state["last_summary_date"] == today_str
+        past_summary_hour = tehran_now.hour >= DAILY_SUMMARY_HOUR
+
+        if not already_sent_today and past_summary_hour:
 
             trend_emoji = "📈" if daily_change > 0 else "📉" if daily_change < 0 else "➖"
 
@@ -222,10 +238,11 @@ def main():
             )
 
             send_telegram_message(message)
+            state["last_summary_date"] = today_str
             print("Daily summary sent.")
 
-        if not alert_sent:
-            print("No threshold crossed and not summary time. No alert sent.")
+        elif not alert_sent:
+            print("No threshold crossed and not summary time yet. No alert sent.")
 
     else:
         print("No previous price found. Saving current price as baseline.")
