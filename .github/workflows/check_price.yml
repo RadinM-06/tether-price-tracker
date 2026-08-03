@@ -2,8 +2,8 @@ name: Check Tether Price
 
 on:
   schedule:
-    # Runs every hour, at minute 0
-    - cron: "0 * * * *"
+    # Runs every hour, at minute 14
+    - cron: "14 * * * *"
   workflow_dispatch: # allows manual run from the Actions tab
 
 permissions:
