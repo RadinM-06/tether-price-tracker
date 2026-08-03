@@ -173,19 +173,7 @@ def main():
         sys.exit(1)
 
     print(f"Current ETH price: ${current_price:,}")
-# ==============================
-# TELEGRAM TEST MESSAGE
-# Remove this block after confirming Telegram works.
-# ==============================
-
-    send_telegram_message(
-        f"✅ *Test Message*\n\n"
-        f"ربات با موفقیت اجرا شد.\n"
-        f"💰 Current ETH Price: *${current_price:,}*"
-    )
-
-    print("Test Telegram message sent.")
-
+    
     last_price = state["price"]
 
     # Reset the daily reference price if it's a new day (Tehran time)
